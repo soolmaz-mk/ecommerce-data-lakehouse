@@ -1,0 +1,25 @@
+.env
+.vscode
+minio/
+spark/data/
+__pycache__/
+*.pyc
+hosseincpl.md
+silver.md
+silver-presentation.md
+silver-dags-fa.md
+bronze-training-fa.md
+metabase-training-fa.md
+.DS_Store
+
+# dbt
+dbt_project/target/
+dbt_project/dbt_packages/
+dbt_project/logs/
+
+*.zip
+.env.*
+!.env.example
+
+/logs/
+*.log

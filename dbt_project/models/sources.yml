@@ -1,0 +1,22 @@
+version: 2
+
+sources:
+  - name: silver
+    description: "Silver layer tables (Kimball star schema), accessed via ClickHouse integration"
+    tables:
+      # Dimensions
+      - name: dim_date
+      - name: dim_user
+      - name: dim_product
+      - name: dim_category
+      - name: dim_device
+      - name: dim_event_type
+      - name: dim_order_status
+      - name: dim_payment_method
+      - name: dim_return_reason
+
+      # Facts (Derived from silver_load DAG tasks)
+      - name: fact_sales
+      - name: fact_orders
+      - name: fact_clickstream
+      - name: fact_returns

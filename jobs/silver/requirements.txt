@@ -1,0 +1,6 @@
+# Silver-layer venv (/opt/venvs/silver) -- Polars + PyIceberg, no Spark/JVM.
+
+polars-lts-cpu==1.33.1
+pyiceberg[s3fs]==0.11.1
+pyarrow>=17.0.0
+pydantic-settings>=2.4,<3

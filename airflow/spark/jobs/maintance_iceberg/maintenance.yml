@@ -1,0 +1,98 @@
+# Iceberg Maintenance Configuration
+
+maintenance:
+
+  catalog: rest
+
+
+  # تنظیمات عمومی
+  defaults:
+
+    expire_snapshots:
+
+      # چند روز snapshot قدیمی نگه داشته شود
+      older_than_days: 7
+
+
+    remove_orphan_files:
+
+      # فایل‌هایی که از این زمان قدیمی‌تر هستند حذف شوند
+      older_than_days: 7
+
+
+
+  tables:
+
+
+    - name: silver.orders
+
+      enabled: true
+
+
+      operations:
+
+        rewrite_data_files:
+
+          enabled: true
+
+          options:
+
+            strategy: binpack
+
+            # حجم هدف فایل‌های parquet
+            target_file_size_bytes: 536870912
+
+
+        rewrite_manifests:
+
+          enabled: true
+
+
+
+        expire_snapshots:
+
+          enabled: true
+
+
+
+        remove_orphan_files:
+
+          enabled: true
+
+
+
+
+    - name: silver.customers
+
+      enabled: true
+
+
+      operations:
+
+        rewrite_data_files:
+
+          enabled: true
+
+          options:
+
+            strategy: binpack
+
+            target_file_size_bytes: 536870912
+
+
+
+        rewrite_manifests:
+
+          enabled: true
+
+
+
+        expire_snapshots:
+
+          enabled: true
+
+
+
+        remove_orphan_files:
+
+          enabled: true

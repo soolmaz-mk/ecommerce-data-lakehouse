@@ -1,0 +1,76 @@
+name: "lakehouse_dbt"
+version: "1.0.0"
+config-version: 2
+
+profile: "clickhouse_profile"
+model-paths: ["models"]
+
+models:
+  lakehouse_dbt:
+    gold:
+      # BEST PRACTICE: Directory-level tagging and materialization for ClickHouse
+      +tags: ["gold", "obt"]
+      +schema: gold
+      +materialized: table
+      +engine: MergeTree()
+
+on-run-start:
+  - "CREATE DATABASE IF NOT EXISTS silver;"
+
+  # ==========================================
+  # 1. Fact Tables
+  # ==========================================
+  - >
+    CREATE TABLE IF NOT EXISTS silver.fact_clickstream 
+    ENGINE = Iceberg('http://minio:9000/warehouse/silver/fact_clickstream', '{{ env_var("MINIO_ROOT_USER") }}', '{{ env_var("MINIO_ROOT_PASSWORD") }}');
+
+  - >
+    CREATE TABLE IF NOT EXISTS silver.fact_orders 
+    ENGINE = Iceberg('http://minio:9000/warehouse/silver/fact_orders', '{{ env_var("MINIO_ROOT_USER") }}', '{{ env_var("MINIO_ROOT_PASSWORD") }}');
+
+  - >
+    CREATE TABLE IF NOT EXISTS silver.fact_returns 
+    ENGINE = Iceberg('http://minio:9000/warehouse/silver/fact_returns', '{{ env_var("MINIO_ROOT_USER") }}', '{{ env_var("MINIO_ROOT_PASSWORD") }}');
+
+  - >
+    CREATE TABLE IF NOT EXISTS silver.fact_sales 
+    ENGINE = Iceberg('http://minio:9000/warehouse/silver/fact_sales', '{{ env_var("MINIO_ROOT_USER") }}', '{{ env_var("MINIO_ROOT_PASSWORD") }}');
+
+  # ==========================================
+  # 2. Dimension Tables
+  # ==========================================
+  - >
+    CREATE TABLE IF NOT EXISTS silver.dim_category 
+    ENGINE = Iceberg('http://minio:9000/warehouse/silver/dim_category', '{{ env_var("MINIO_ROOT_USER") }}', '{{ env_var("MINIO_ROOT_PASSWORD") }}');
+
+  - >
+    CREATE TABLE IF NOT EXISTS silver.dim_date 
+    ENGINE = Iceberg('http://minio:9000/warehouse/silver/dim_date', '{{ env_var("MINIO_ROOT_USER") }}', '{{ env_var("MINIO_ROOT_PASSWORD") }}');
+
+  - >
+    CREATE TABLE IF NOT EXISTS silver.dim_device 
+    ENGINE = Iceberg('http://minio:9000/warehouse/silver/dim_device', '{{ env_var("MINIO_ROOT_USER") }}', '{{ env_var("MINIO_ROOT_PASSWORD") }}');
+
+  - >
+    CREATE TABLE IF NOT EXISTS silver.dim_event_type 
+    ENGINE = Iceberg('http://minio:9000/warehouse/silver/dim_event_type', '{{ env_var("MINIO_ROOT_USER") }}', '{{ env_var("MINIO_ROOT_PASSWORD") }}');
+
+  - >
+    CREATE TABLE IF NOT EXISTS silver.dim_order_status 
+    ENGINE = Iceberg('http://minio:9000/warehouse/silver/dim_order_status', '{{ env_var("MINIO_ROOT_USER") }}', '{{ env_var("MINIO_ROOT_PASSWORD") }}');
+
+  - >
+    CREATE TABLE IF NOT EXISTS silver.dim_payment_method 
+    ENGINE = Iceberg('http://minio:9000/warehouse/silver/dim_payment_method', '{{ env_var("MINIO_ROOT_USER") }}', '{{ env_var("MINIO_ROOT_PASSWORD") }}');
+
+  - >
+    CREATE TABLE IF NOT EXISTS silver.dim_product 
+    ENGINE = Iceberg('http://minio:9000/warehouse/silver/dim_product', '{{ env_var("MINIO_ROOT_USER") }}', '{{ env_var("MINIO_ROOT_PASSWORD") }}');
+
+  - >
+    CREATE TABLE IF NOT EXISTS silver.dim_return_reason 
+    ENGINE = Iceberg('http://minio:9000/warehouse/silver/dim_return_reason', '{{ env_var("MINIO_ROOT_USER") }}', '{{ env_var("MINIO_ROOT_PASSWORD") }}');
+
+  - >
+    CREATE TABLE IF NOT EXISTS silver.dim_user 
+    ENGINE = Iceberg('http://minio:9000/warehouse/silver/dim_user', '{{ env_var("MINIO_ROOT_USER") }}', '{{ env_var("MINIO_ROOT_PASSWORD") }}');
