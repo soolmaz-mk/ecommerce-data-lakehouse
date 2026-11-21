@@ -1,101 +1,141 @@
-# Spark configuration
+# Spark configuration and Bronze execution
 
-This directory holds everything Spark needs to talk to MinIO over the S3A connector, plus the base image for the `jobs/bronze_ingestion` streaming job.
+This directory contains the custom Spark image and the shared S3A configuration
+for the local Spark standalone cluster. The same image is used by `spark-master`,
+`spark-worker`, and `bronze-ingestion`, with different container commands.
 
 ## How it works
 
-The cluster is a plain Spark **standalone** cluster, not YARN/Kubernetes:
-`spark-master` is the cluster manager, `spark-worker` is the (single) node
-that actually runs tasks, and `bronze-ingestion` is a client that submits a
-job to that cluster over `spark://spark-master:7077` and then acts as the
-job's driver for as long as it runs. All three are the same Docker image
-(this directory's `Dockerfile`) — they only differ in the command
-`docker-compose.yaml` gives each container.
+The cluster uses **Spark standalone**, not YARN or Kubernetes. `spark-master`
+coordinates applications; `spark-worker` supplies executor resources. The
+`bronze-ingestion` container runs a **Python launcher** that submits **one
+independent Spark application per Kafka topic** to
+`spark://spark-master:7077`.
 
-`bronze-ingestion` doesn't submit one job and exit. `jobs/bronze_ingestion/main.py`
-starts one Spark Structured Streaming **query per Kafka topic**, all inside
-the same driver process, and then blocks on
-`spark.streams.awaitAnyTermination()` — so the container itself *is* the
-long-running pipeline, not something that launches a job and returns. Each
-query independently, on its own trigger (every `TRIGGER_INTERVAL`, 30s by
-default):
+The final entry point is `jobs/run_bronze_ingestion.py`:
 
-1. Asks Kafka what's new since its last checkpoint.
-2. Pulls that micro-batch, decodes each record's Avro payload (see
-   `jobs/bronze_ingestion/README.md` for how), and writes it to MinIO as
-   Parquet.
-3. Writes a checkpoint recording how far it got, to
-   `s3a://<bucket>/<checkpoint_path>/<topic>/` in MinIO.
+- Without `--topic`, it imports `bronze_ingestion.launcher.submit_all()` under
+  plain Python, without importing PySpark.
+- For each configured Kafka topic, `launcher.py` starts a separate
+  `spark-submit ... --topic <topic>` child process.
+- With `--topic`, the entry point imports `bronze_ingestion.main.run(topic)`;
+  that application owns one long-running Structured Streaming query.
+- The launcher monitors each child and restarts failed applications
+  independently with exponential backoff (up to five minutes). The Docker
+  restart policy is a fallback for failure of the launcher itself.
 
-That checkpoint is what makes the whole thing resumable rather than
-stateless: if the container restarts for any reason — a redeploy, the
-external Kafka cluster going down and `docker compose`'s
-`restart: unless-stopped` cycling the container while it's unreachable,
-whatever — each query resumes from its own last committed checkpoint
-instead of re-reading from `KAFKA_STARTING_OFFSETS` again. The very first
-run for a topic is the only time that setting matters.
+This replaces an earlier, superseded design in which all topics shared one
+Spark application and FAIR-scheduler pools. **The final implementation does
+not rely on per-topic FAIR-scheduler pools.**
 
-Because every topic's query lives in the same driver/JVM and they're all
-competing for the same worker's cores, `main.py` also puts each one in its
-own Spark **fair-scheduler pool** (see "Concurrent topics and the FAIR
-scheduler" in `jobs/bronze_ingestion/README.md`) — without that, a
-high-volume topic's query can starve a low-volume one of any scheduling
-time at all, since Spark's default is FIFO, not round-robin, across
-concurrently running jobs in one SparkContext.
+```mermaid
+flowchart TD
+    K["Kafka topics"] --> L["Python launcher"]
+    L --> A["spark-submit: topic A"]
+    L --> B["spark-submit: topic B"]
+    L --> C["spark-submit: topic N"]
+    A --> S["Spark standalone master and worker"]
+    B --> S
+    C --> S
+    S --> M[("MinIO / Bronze Parquet")]
+```
 
-Failure is handled at two levels. Per-topic: `main.py` wraps each query's
-startup in its own `try`/`except`, so one topic failing to decode or
-reach the Schema Registry doesn't take the others down with it. Whole-job:
-if *every* topic fails to start (for example, the whole external Kafka
-cluster being unreachable), `main.py` raises and the process exits —
-`docker-compose.yaml`'s `restart: unless-stopped` is what actually
-retries it from there, not anything inside the Python code.
+The diagram shows an illustrative number of topics; the actual list comes
+from `KAFKA_TOPICS`.
+
+## Resource allocation and failure handling
+
+`launcher.py` divides the configured worker cores and memory across the topic
+count and passes `--total-executor-cores` and `--executor-memory` to each
+submission. Each application uses `--driver-memory 512m` and runs in Spark
+client mode, so the `bronze-ingestion` container must have enough memory for
+all of its driver JVMs.
+
+If the topic count exceeds the available worker cores, the minimum allocation
+of one core per application can exceed capacity; **concurrent execution is not
+guaranteed**. The launcher staggers initial submissions and applies increasing
+backoff to repeatedly failing applications, allowing healthy topics to
+continue independently.
+
+Each topic has its own Structured Streaming checkpoint under MinIO. Checkpoints
+allow a restarted topic application to resume its stream. See
+[`jobs/bronze_ingestion/README.md`](../jobs/bronze_ingestion/README.md) for
+Avro decoding, dead-letter routing, and the at-least-once write semantics.
 
 ## Files
 
-- `Dockerfile` — builds a custom Spark image on top of `apache/spark:3.5.3` with the S3A/Kafka/Avro jars and `jobs/bronze_ingestion`'s Python dependencies baked in (see [Jars](#jars) below). `spark-master`, `spark-worker`, and `bronze-ingestion` in the root `docker-compose.yaml` all build from this instead of using the base image directly — they only differ in the command each runs. Built with the **repo root** as context (not this directory), so it can `COPY jobs /opt/spark-apps/jobs`.
-- `conf/spark-defaults.conf` — mounted read-only into `spark-master`, `spark-worker`, and `bronze-ingestion` at `/opt/spark/conf/spark-defaults.conf`. Applies to every job submitted to the cluster, so individual `spark-submit` calls don't need to repeat these settings.
+- `Dockerfile` — builds the custom Spark image with Kafka, Avro and S3A JARs,
+  plus Bronze Python dependencies. Build context is the repository root so
+  the image can copy `jobs/`.
+- `conf/spark-defaults.conf` — bind-mounted shared Spark/Hadoop configuration.
 
-## `spark-defaults.conf` explained
+## S3A configuration
 
-```
-spark.hadoop.fs.s3a.endpoint            http://minio:9000
-spark.hadoop.fs.s3a.path.style.access   true
-spark.hadoop.fs.s3a.impl                org.apache.hadoop.fs.s3a.S3AFileSystem
-spark.hadoop.fs.s3a.connection.ssl.enabled false
-spark.hadoop.fs.s3a.aws.credentials.provider com.amazonaws.auth.EnvironmentVariableCredentialsProvider
-```
-Points Spark's S3A client at MinIO instead of real AWS S3:
-- `endpoint` — MinIO's S3 API (not the console port, `9001`). `minio` resolves via the shared `datalake_network` Docker network.
-- `path.style.access=true` — MinIO doesn't support AWS's virtual-hosted-style bucket addressing (`bucket.minio:9000`), so force `minio:9000/bucket` instead.
-- `ssl.enabled=false` — this stack doesn't terminate TLS in front of MinIO.
-- `EnvironmentVariableCredentialsProvider` — reads `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` from the `spark-master`/`spark-worker` container environment instead of a static key in this file. The root `docker-compose.yaml` sets those from `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` in `.env`, so credentials stay out of tracked files. Note this class lives in the AWS SDK (`com.amazonaws.auth`), not Hadoop's own `org.apache.hadoop.fs.s3a.auth` package — there's no Hadoop-native equivalent for plain env-var credentials.
+The configuration points Hadoop's S3A connector at MinIO rather than AWS S3:
 
+```properties
+spark.hadoop.fs.s3a.endpoint                  http://minio:9000
+spark.hadoop.fs.s3a.path.style.access         true
+spark.hadoop.fs.s3a.impl                      org.apache.hadoop.fs.s3a.S3AFileSystem
+spark.hadoop.fs.s3a.connection.ssl.enabled    false
+spark.hadoop.fs.s3a.aws.credentials.provider  com.amazonaws.auth.EnvironmentVariableCredentialsProvider
 ```
-spark.hadoop.fs.s3a.connection.timeout          5000
+
+- Port `9000` is MinIO's S3 API, not its web console (`9001`).
+- Path-style bucket addressing avoids virtual-host-style bucket names.
+- TLS is not terminated in front of MinIO in this local deployment.
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are supplied through the
+  container environment from `.env`, not committed to this configuration file.
+
+Additional connection settings used by this stack:
+
+```properties
+spark.hadoop.fs.s3a.connection.timeout           5000
 spark.hadoop.fs.s3a.connection.establish.timeout 5000
-spark.hadoop.fs.s3a.attempts.maximum            3
-spark.hadoop.fs.s3a.retry.limit                 3
-spark.hadoop.fs.s3a.change.detection.mode       none
+spark.hadoop.fs.s3a.attempts.maximum             3
+spark.hadoop.fs.s3a.retry.limit                  3
+spark.hadoop.fs.s3a.change.detection.mode        none
 ```
-Without these, multi-partition writes to MinIO can deadlock indefinitely instead of failing — Hadoop's S3A client normally uses S3's per-object versioning to detect concurrent modification, but MinIO here isn't running with object versioning enabled, and a couple of executors hung forever waiting on a check that could never resolve. `change.detection.mode=none` disables that check, and the timeout/retry settings make sure a genuine connectivity problem surfaces as an error within seconds instead of hanging the job.
 
-## Jars
+These limit retries and disable object-version-based change detection in the
+local MinIO setup. Confirm the exact settings in `conf/spark-defaults.conf`
+before deploying a changed version of the stack.
 
-Spark's S3A support needs two jars that aren't bundled with `apache/spark:3.5.3`:
-- `hadoop-aws-3.3.4.jar` (matches the Hadoop 3.3.4 client baked into this Spark image — check with `docker run --rm apache/spark:3.5.3 ls /opt/spark/jars | grep hadoop-client` if you ever bump the Spark version)
-- `aws-java-sdk-bundle-1.12.262.jar` (the AWS SDK version `hadoop-aws:3.3.4` was built against)
+## JAR dependencies
 
-`jobs/bronze_ingestion` (Kafka + Avro decoding) needs five more, matched against `spark-sql-kafka-0-10`'s and `spark-avro`'s own compile-scope dependencies for Spark 3.5.3 (checked against their POMs on Maven Central — everything else those two connectors need, like `spark-sql` itself or the Avro core jars, is already bundled in the base image):
-- `spark-sql-kafka-0-10_2.12-3.5.3.jar`, `spark-token-provider-kafka-0-10_2.12-3.5.3.jar`, `kafka-clients-3.4.1.jar`, `commons-pool2-2.11.1.jar` — the Kafka connector
-- `spark-avro_2.12-3.5.3.jar`, `xz-1.9.jar` — the Avro connector
+The image bundles dependencies required for Spark 3.5.3, including:
 
-All seven are downloaded directly into `/opt/spark/jars/` at build time, which is already on Spark's default classpath — no `extraClassPath` config, `spark-submit --packages`, or separate init container needed. Baking them in also means jobs don't need internet access to Maven Central or a writable Ivy cache (`$HOME` for the image's `spark` user doesn't exist by default, which breaks Ivy's/pip's cache — build steps run as root specifically to work around this, then switch back to the `spark` user at the end). Rebuild the images (`docker compose build spark-master spark-worker bronze-ingestion`, or just `docker compose up --build`) whenever you change the jar list, versions, or `jobs/` itself.
+- `hadoop-aws-3.3.4.jar` and `aws-java-sdk-bundle-1.12.262.jar` for S3A.
+- `spark-sql-kafka-0-10_2.12-3.5.3.jar`,
+  `spark-token-provider-kafka-0-10_2.12-3.5.3.jar`,
+  `kafka-clients-3.4.1.jar`, and `commons-pool2-2.11.1.jar` for Kafka.
+- `spark-avro_2.12-3.5.3.jar` and `xz-1.9.jar` for Avro.
+
+These are baked into `/opt/spark/jars/` at image-build time. Jobs do not need
+`--packages` or access to Maven Central at runtime. Keep connector versions
+aligned with the Spark/Hadoop versions in the base image when upgrading.
 
 ## Python dependencies
 
-`jobs/bronze_ingestion/config.py` needs `pydantic-settings`, installed via `pip3` at build time — pinned to `2.8.1`, not the latest, because `pydantic-settings` 2.9+ dropped support for Python 3.8, which is what this base image ships.
+The custom image installs Bronze dependencies, including
+`pydantic-settings==2.8.1`, pinned for compatibility with the Python version
+in the Spark base image.
 
-## Adding more S3A / Spark settings
+## Updating and rebuilding
 
-Any `spark.*` key added to `spark-defaults.conf` takes effect on the next `docker compose restart spark-master spark-worker bronze-ingestion` — no image rebuild needed, since it's a read-only bind mount.
+Changes to `spark-defaults.conf` take effect after restarting the Spark
+services, since the file is bind-mounted:
+
+```bash
+docker compose restart spark-master spark-worker bronze-ingestion
+```
+
+Changes to the Dockerfile, dependency versions, JARs or files copied into the
+image require a rebuild:
+
+```bash
+docker compose build spark-master spark-worker bronze-ingestion
+docker compose up -d spark-master spark-worker bronze-ingestion
+```
+
+For single-topic execution and troubleshooting, see the Bronze README.

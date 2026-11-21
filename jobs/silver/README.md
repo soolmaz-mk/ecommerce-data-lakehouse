@@ -129,6 +129,9 @@ flowchart TD
     classDef fail fill:#ffebee,stroke:#e53935,color:#b71c1c
 ```
 
+The ninth dimension, `dim_date`, is initialized separately by `seed_dim_date`;
+the remaining eight dimensions are loaded by the `load_dim` tasks.
+
 `drop_audit_branches` uses `trigger_rule="one_failed"`. It cleans up **and then
 raises**, so a broken run is reported as failed. Without that it was the only
 leaf task, and Airflow marked runs green while tasks underneath had failed.
@@ -315,8 +318,8 @@ files-per-partition starts rising, not on a timer.
 
 ### Settings
 
-All optional — the defaults match the in-network service names. Full list with
-reasoning in `hosseincpl.md` PART 12.4.
+These optional settings use the in-network service names by default.
+Check `config.py` and `.env.example` for the complete configuration contract.
 
 | Variable | Default | Meaning |
 |---|---|---|

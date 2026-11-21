@@ -1,11 +1,11 @@
 # Presentation layer — Metabase on ClickHouse
 
 Phase 4 of the project: business dashboards over the gold OBT tables, plus the
-bonus real-time pipeline monitoring read straight from Kafka.
+an optional direct Kafka-to-ClickHouse monitoring path (see its separate status below).
 
-Everything here is **provisioned from code**. The dashboards are not clicked
-together in the UI and screenshotted — they are 24 SQL files plus a script, so
-a review can read the business logic in git and a rebuild is one command.
+The dashboard definitions are maintained as SQL files and an automated
+provisioning script. This documentation covers the implementation and
+operational caveats of the team-built presentation layer.
 
 ```
 metabase/
@@ -100,7 +100,7 @@ docker compose --profile provision run --rm metabase-init
 
 On a brand-new Metabase this completes the setup wizard and creates the first
 admin. On an existing one it logs in. Either way it then creates or updates the
-ClickHouse connection, all 24 cards and all 6 dashboards.
+ClickHouse connection, the configured cards and dashboards (excluding the optional monitoring dashboard when requested).
 
 **It is idempotent** — objects are matched by name and updated, not
 duplicated. Edit a `.sql` file and re-run to push the change.
@@ -114,6 +114,12 @@ python3 metabase/provision.py --dry-run
 ---
 
 ## 3. The dashboards
+
+The core business dashboards were subsequently deployed by other team members
+after the initial static-validation stage. The author of the repository
+portfolio summary did not personally verify or capture those deployments.
+The optional real-time monitoring dashboard has a separate status below.
+
 
 | Dashboard | Cards | Answers |
 |---|---|---|
@@ -201,19 +207,21 @@ new messages on `transactional.orders` and `behavioral.events` over a 20-second
 watermark probe), so a live monitoring dashboard would have had nothing to show
 regardless.
 
-## 5. Verification status
+## 5. Verification history and current evidence
 
-The SQL, the provisioning script and the compose wiring are complete and
-statically checked:
+The following checks were recorded during development:
 
 - `docker compose config` renders all 17 services including `metabase-init`
 - `provision.py --dry-run` parses all 24 questions into 6 dashboards
 - `bash -n` and `py_compile` pass
 
-They have **not** been executed against the live stack in this session — GitLab
-was down and there was no SSH credential for the deploy host. Run section 2 on
-the server and check `monitoring.v_health_summary` returns rows before
-presenting.
+At the time these checks were documented, live deployment had not yet been
+verified in that session. The core Metabase dashboards were subsequently run
+by other team members, as reported by the project team; deployment screenshots
+or logs are not included here. This statement does **not** verify that the
+optional direct Kafka-to-ClickHouse monitoring path was operational.
+Before demonstrating live monitoring, verify that
+`monitoring.v_health_summary` returns fresh rows.
 
 The Metabase REST API is not a stable public contract and does shift between
 releases; this targets the v0.62 shape. If a call starts failing after an
